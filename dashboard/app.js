@@ -140,14 +140,24 @@
     return (value > 0 ? '+' : value < 0 ? '−' : '') + Math.abs(value).toFixed(digits) + suffix;
   }
 
-  function deltaCell(label, left, right, renderValue, deltaSuffix, deltaDigits) {
+  function deltaCell(label, left, right, renderValue, deltaSuffix, deltaDigits, leftDot, rightDot) {
     var delta = right - left;
     return el('tr', null,
       el('td', null, label),
-      el('td', { class: 'num' }, renderValue(left)),
-      el('td', { class: 'num' }, renderValue(right)),
+      el('td', { class: 'num' }, leftDot, renderValue(left)),
+      el('td', { class: 'num' }, rightDot, renderValue(right)),
       el('td', { class: 'num delta' }, renderValue === fmtUsd ? signedUsd(delta) : signedNumber(delta, deltaSuffix || '', deltaDigits || 0))
     );
+  }
+
+  function confidenceDot(row) {
+    var confidence = typeof row.confidence === 'number' ? row.confidence : 0;
+    var tone = confidence >= 70 ? 'green' : confidence >= 45 ? 'amber' : 'red';
+    return el('span', {
+      class: 'confidence-dot ' + tone,
+      title: confidence + ' / 100 confidence',
+      'aria-label': confidence + ' / 100 confidence'
+    });
   }
 
   function pctOf(value) { return fmtPct(value); }
@@ -181,7 +191,7 @@
             deltaCell('7d growth', left.change_7d || 0, right.change_7d || 0, pctOf, '%', 2),
             deltaCell('Age', left.age_days || 0, right.age_days || 0, daysOf, 'd', 0),
             deltaCell('Category multiplier', left.category_multiplier || 1, right.category_multiplier || 1, multiplierOf, 'x', 2),
-            deltaCell('Implied value', left.implied_value_usd, right.implied_value_usd, fmtUsd),
+            deltaCell('Implied value', left.implied_value_usd, right.implied_value_usd, fmtUsd, undefined, 0, confidenceDot(left), confidenceDot(right)),
             deltaCell('Band low', left.band_low_usd, right.band_low_usd, fmtUsd),
             deltaCell('Band high', left.band_high_usd, right.band_high_usd, fmtUsd)
           )
@@ -377,7 +387,8 @@
         el('td', { class: 'num', text: fmtAge(r.age_days) }),
         el('td', null, el('div', { class: 'implied' },
           el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round((r.implied_value_usd / max) * 100)) + '%' })),
-          el('span', { class: 'num money', text: fmtUsd(r.implied_value_usd) })
+          el('span', { class: 'num money', text: fmtUsd(r.implied_value_usd) }),
+          confidenceDot(r)
         )),
         el('td', null, el('div', { class: 'thesis' }, trendGlyph(r), el('span', { text: thesisFor(r) }))),
         el('td', null, el('span', { class: 'status', text: 'no token' }))
@@ -520,7 +531,7 @@
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
         el('div', null, el('span', { text: 'Maturity multiplier' }), el('b', { class: 'num', text: String(row.maturity_multiplier) })),
         el('div', null, el('span', { text: 'Sector multiplier' }), el('b', { class: 'num', text: String(row.category_multiplier || 1) })),
-        el('div', null, el('span', { text: 'Implied value (band)' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) + '  (' + fmtUsd(row.band_low_usd) + ' – ' + fmtUsd(row.band_high_usd) + ')' }))
+        el('div', null, el('span', { text: 'Implied value (band)' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) + '  (' + fmtUsd(row.band_low_usd) + ' – ' + fmtUsd(row.band_high_usd) + ')' }), confidenceDot(row))
       ),
       el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(impliedOf(row, DATA.model)) + (impliedOf(row, DATA.model) === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
     ));

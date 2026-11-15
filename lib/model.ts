@@ -107,6 +107,7 @@ export interface BoardRow {
   symbol: string | null;
   token_status: 'pre-token';
   age_days: number | null;
+  confidence: number;
   implied_value_usd: number;
   band_low_usd: number;
   band_high_usd: number;
@@ -134,6 +135,7 @@ export interface RadarRow {
   mcap_usd: number | null;
   listed_at: string | null;
   age_days: number | null;
+  confidence: number;
   implied_value_usd: number;
   band_low_usd: number;
   band_high_usd: number;
@@ -177,6 +179,44 @@ export class SnapshotError extends Error {
 }
 
 const DAY_MS = 86_400_000;
+
+/**
+ * Confidence is evidence quality, not forecast strength. It is derived only from the snapshot:
+ *
+ *   tvlEvidence   = clamp(log10(max(tvl_usd, 1)) / log10(100,000,000), 0, 1)
+ *   growthVariance = population variance of every finite change_7d value
+ *   growthEvidence = 1 / (1 + growthVariance / 2,500) * (change_7d === null ? 0.6 : 1)
+ *   ageEvidence    = age_days === null ? 0.15 : clamp(age_days / 1,095, 0, 1)
+ *   confidence     = clamp(round(100 * (0.45 * tvlEvidence + 0.35 * growthEvidence + 0.20 * ageEvidence)), 0, 100)
+ *
+ * Variance is divided by 50², so a 50-point standard deviation yields half credit. Missing age is weak
+ * rather than zero evidence; a missing row growth further discounts the growth component.
+ */
+const CONFIDENCE_TVL_CEILING = 100_000_000;
+const CONFIDENCE_GROWTH_SCALE = 2_500;
+const CONFIDENCE_MISSING_GROWTH_FACTOR = 0.6;
+const CONFIDENCE_MISSING_AGE = 0.15;
+const CONFIDENCE_AGE_DAYS = 1_095;
+
+/** The population variance of the finite seven-day growth observations in the snapshot. */
+export function growthVariance(protocols: SnapshotProtocol[]): number {
+  const growth = protocols
+    .map((p) => p.change_7d)
+    .filter((value): value is number => value !== null && Number.isFinite(value));
+  if (growth.length === 0) return 0;
+  const mean = growth.reduce((sum, value) => sum + value, 0) / growth.length;
+  return growth.reduce((sum, value) => sum + (value - mean) ** 2, 0) / growth.length;
+}
+
+/** A 0..100 confidence score for one row, using the snapshot date and its growth variance. */
+export function confidenceScore(protocol: SnapshotProtocol, asOf: string, variance: number): number {
+  const tvlEvidence = Math.min(1, Math.max(0, Math.log10(Math.max(protocol.tvl_usd, 1)) / Math.log10(CONFIDENCE_TVL_CEILING)));
+  const varianceEvidence = 1 / (1 + Math.max(variance, 0) / CONFIDENCE_GROWTH_SCALE);
+  const growthEvidence = varianceEvidence * (protocol.change_7d === null ? CONFIDENCE_MISSING_GROWTH_FACTOR : 1);
+  const ageEvidence = protocol.listed_at === null ? CONFIDENCE_MISSING_AGE : Math.min(1, Math.max(0, (ageDays(asOf, protocol.listed_at) ?? 0) / CONFIDENCE_AGE_DAYS));
+  const score = 100 * (0.45 * tvlEvidence + 0.35 * growthEvidence + 0.2 * ageEvidence);
+  return Math.min(100, Math.max(0, Math.round(score)));
+}
 
 /** A finite number, else `fallback`. */
 function finite(value: unknown, fallback: number): number {
@@ -250,9 +290,10 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     .slice(0, EARLY_ROWS);
   for (const p of early) chosen.set(p.slug, p);
 
+  const variance = growthVariance(snapshot.protocols);
   const scored = [...chosen.values()].map((p) => {
     const { implied, growthPct, growthMult, maturityMult, categoryMult, age } = impliedValue(p, snapshot.as_of, model);
-    return { p, implied, growthPct, growthMult, maturityMult, categoryMult, age };
+    return { p, implied, growthPct, growthMult, maturityMult, categoryMult, age, confidence: confidenceScore(p, snapshot.as_of, variance) };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
@@ -269,6 +310,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     symbol: s.p.symbol,
     token_status: 'pre-token',
     age_days: s.age,
+    confidence: s.confidence,
     implied_value_usd: s.implied,
     band_low_usd: Math.max(1, Math.round(s.implied * BAND_LOW)),
     band_high_usd: Math.round(s.implied * BAND_HIGH),
@@ -406,6 +448,7 @@ export function radarRow(row: BoardRow): RadarRow {
     mcap_usd: row.mcap_usd,
     listed_at: row.listed_at,
     age_days: row.age_days,
+    confidence: row.confidence,
     implied_value_usd: row.implied_value_usd,
     band_low_usd: row.band_low_usd,
     band_high_usd: row.band_high_usd,

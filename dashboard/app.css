@@ -92,6 +92,10 @@ tbody tr:last-child td { border-bottom: none; }
 .bar { width: 120px; height: 6px; border-radius: 3px; background: var(--line-soft); overflow: hidden; }
 .bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent-dim), var(--accent)); }
 .implied { display: flex; align-items: center; gap: 8px; }
+.confidence-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; }
+.confidence-dot.green { background: var(--pos); }
+.confidence-dot.amber { background: var(--warm); }
+.confidence-dot.red { background: var(--neg); }
 .status { display: inline-flex; align-items: center; gap: 6px; color: var(--warm); font-size: 12px; white-space: nowrap; }
 .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--warm); }
 .thesis { display: flex; align-items: center; gap: 8px; min-width: 220px; }
