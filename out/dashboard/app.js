@@ -7,7 +7,78 @@
   var DATA = window.RADAR;
   if (!DATA) return;
   var app = document.getElementById('board');
-  var state = { q: '', category: 'all', tab: 'pre-token', sort: 'implied', dir: -1, selected: null, compare: [] };
+  var STORAGE_KEY = 'token-radar:board-preferences:v1';
+  var state = {
+    q: '',
+    category: 'all',
+    tab: 'pre-token',
+    sort: 'implied',
+    dir: -1,
+    selected: null,
+    compare: [],
+    onlyHighConfidence: false,
+    focusedSlug: null,
+    restoreFocus: false
+  };
+
+  function storage() {
+    try {
+      return window.localStorage;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function selectorValue(value) {
+    if (window.CSS && typeof CSS.escape === 'function') return CSS.escape(value);
+    return value.replace(/([^a-zA-Z0-9_.-])/g, '\\$1');
+  }
+
+  function isSortKey(key) {
+    return ['implied', 'name', 'tvl', 'growth', 'age', 'ratio', 'confidence'].indexOf(key) >= 0;
+  }
+
+  function readPreferences() {
+    var store = storage();
+    if (!store) return;
+    var raw;
+    try {
+      raw = store.getItem(STORAGE_KEY);
+    } catch (error) {
+      return;
+    }
+    if (!raw) return;
+    try {
+      var saved = JSON.parse(raw);
+      if (saved && typeof saved === 'object') {
+        if (isSortKey(saved.sort)) state.sort = saved.sort;
+        if (saved.dir === 1 || saved.dir === -1) state.dir = saved.dir;
+        if (typeof saved.onlyHighConfidence === 'boolean') {
+          state.onlyHighConfidence = saved.onlyHighConfidence;
+        }
+      }
+    } catch (error) {
+      try {
+        store.removeItem(STORAGE_KEY);
+      } catch (removeError) {
+        return;
+      }
+    }
+  }
+
+  function writePreferences() {
+    var store = storage();
+    if (!store) return;
+    try {
+      store.setItem(STORAGE_KEY, JSON.stringify({
+        sort: state.sort,
+        dir: state.dir,
+        onlyHighConfidence: state.onlyHighConfidence
+      }));
+    } catch (error) {
+      return;
+    }
+  }
 
   var usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
   function fmtUsd(n) {
@@ -152,12 +223,83 @@
 
   function confidenceDot(row) {
     var confidence = typeof row.confidence === 'number' ? row.confidence : 0;
-    var tone = confidence >= 70 ? 'green' : confidence >= 45 ? 'amber' : 'red';
+    var tone = confidence >= 70 ? 'green' : confidence >= 40 ? 'amber' : 'red';
     return el('span', {
       class: 'confidence-dot ' + tone,
       title: confidence + ' / 100 confidence',
       'aria-label': confidence + ' / 100 confidence'
     });
+  }
+
+  function confidenceOf(row) {
+    return typeof row.confidence === 'number' && isFinite(row.confidence) ? row.confidence : 0;
+  }
+
+  function confidenceTone(confidence) {
+    if (confidence >= 70) return 'green';
+    if (confidence >= 40) return 'amber';
+    return 'red';
+  }
+
+  function confidenceTier(row) {
+    var confidence = confidenceOf(row);
+    if (confidence >= 70) return 'high';
+    if (confidence >= 40) return 'medium';
+    return 'low';
+  }
+
+  function valueTvlRatio(row) {
+    if (!row.tvl_usd || !isFinite(row.tvl_usd) || row.tvl_usd <= 0) return 0;
+    if (!isFinite(row.implied_value_usd)) return 0;
+    return row.implied_value_usd / row.tvl_usd;
+  }
+
+  function confidenceBadge(row) {
+    var confidence = confidenceOf(row);
+    return el('span', {
+      class: 'confidence-badge ' + confidenceTone(confidence),
+      text: confidence + '/100'
+    });
+  }
+
+  function watchlistHealth() {
+    var counts = { high: 0, medium: 0, low: 0 };
+    DATA.rows.forEach(function (row) {
+      counts[confidenceTier(row)] += 1;
+    });
+    var total = DATA.rows.length || 1;
+    var tiers = [
+      { key: 'high', label: 'Confidence 70+', count: counts.high },
+      { key: 'medium', label: 'Confidence 40–69', count: counts.medium },
+      { key: 'low', label: 'Confidence under 40', count: counts.low }
+    ];
+    return el('section', { class: 'panel health', 'aria-label': 'Watchlist health' },
+      el('div', { class: 'health-head' },
+        el('div', null,
+          el('h2', { text: 'Watchlist health' }),
+          el('p', { class: 'sub', text: 'Model confidence across all ' + DATA.rows.length + ' scored protocols.' })
+        ),
+        el('div', { class: 'health-total', 'aria-hidden': 'true' },
+          el('i', { style: 'width:' + Math.round((counts.high / total) * 100) + '%' })
+        )
+      ),
+      el('div', { class: 'health-grid' }, tiers.map(function (tier) {
+        var share = Math.round((tier.count / total) * 100);
+        return el('div', { class: 'health-item ' + tier.key },
+          el('span', { class: 'health-label', text: tier.label }),
+          el('b', { class: 'health-count', text: String(tier.count) }),
+          el('span', { class: 'health-share', text: share + '% of board' })
+        );
+      })),
+      el('p', { class: 'health-hint sub', text: 'High confidence is 70 or above. Medium scores are 40 through 69; lower scores remain visible but are less reliable.' })
+    );
+  }
+
+  function confidenceTierLabel(row) {
+    var tier = confidenceTier(row);
+    if (tier === 'high') return 'high confidence';
+    if (tier === 'medium') return 'medium confidence';
+    return 'low confidence';
   }
 
   function pctOf(value) { return fmtPct(value); }
@@ -256,6 +398,7 @@
     var params = new URLSearchParams(hash);
     if (params.get('q')) state.q = params.get('q');
     if (params.get('p')) state.selected = params.get('p');
+    if (state.selected) state.focusedSlug = state.selected;
     if (params.get('category')) state.category = params.get('category');
   }
   function writeHash() {
@@ -272,20 +415,28 @@
     var q = state.q.trim().toLowerCase();
     return DATA.rows.filter(function (r) {
       if (state.category !== 'all' && r.category !== state.category) return false;
+      if (state.onlyHighConfidence && confidenceOf(r) < 70) return false;
       if (!q) return true;
       var hay = [r.name, r.slug, r.category, (r.chains || []).join(' ')].join(' ').toLowerCase();
       return hay.indexOf(q) >= 0;
     });
   }
+
+  function sortValue(row, key) {
+    if (key === 'name') return row.name.toLowerCase();
+    if (key === 'tvl') return row.tvl_usd;
+    if (key === 'growth') return row.change_7d === null || row.change_7d === undefined ? -Infinity : row.change_7d;
+    if (key === 'age') return row.age_days === null || row.age_days === undefined ? Infinity : row.age_days;
+    if (key === 'ratio') return valueTvlRatio(row);
+    if (key === 'confidence') return confidenceOf(row);
+    return row.implied_value_usd;
+  }
+
   function sortedRows(list) {
     var key = state.sort;
     return list.slice().sort(function (a, b) {
-      var av, bv;
-      if (key === 'name') { av = a.name.toLowerCase(); bv = b.name.toLowerCase(); }
-      else if (key === 'tvl') { av = a.tvl_usd; bv = b.tvl_usd; }
-      else if (key === 'growth') { av = a.change_7d === null ? -Infinity : a.change_7d; bv = b.change_7d === null ? -Infinity : b.change_7d; }
-      else if (key === 'age') { av = a.age_days === null ? Infinity : a.age_days; bv = b.age_days === null ? Infinity : b.age_days; }
-      else { av = a.implied_value_usd; bv = b.implied_value_usd; }
+      var av = sortValue(a, key);
+      var bv = sortValue(b, key);
       if (av < bv) return -state.dir;
       if (av > bv) return state.dir;
       return a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0;
@@ -301,6 +452,11 @@
         el('span', { text: DATA.model_version + ' model' })
       )
     );
+  }
+
+  function formatRatio(row) {
+    var ratio = valueTvlRatio(row);
+    return isFinite(ratio) ? ratio.toFixed(2) + 'x' : 'n/a';
   }
 
   function lede() {
@@ -327,12 +483,27 @@
       categories.map(function (c) { return el('option', { value: c, text: c, selected: c === state.category ? 'selected' : null }); })
     );
     select.addEventListener('change', function () { state.category = select.value; writeHash(); render(); });
+    var highConfidence = el('input', {
+      type: 'checkbox',
+      id: 'only-high-confidence',
+      checked: state.onlyHighConfidence ? 'checked' : null
+    });
+    highConfidence.addEventListener('change', function () {
+      state.onlyHighConfidence = highConfidence.checked;
+      state.selected = null;
+      writePreferences();
+      writeHash();
+      render();
+    });
     var pre = el('button', { type: 'button', 'aria-pressed': state.tab === 'pre-token' ? 'true' : 'false', text: 'Pre-token', onclick: function () { state.tab = 'pre-token'; render(); } });
     var live = el('button', { type: 'button', 'aria-pressed': state.tab === 'live' ? 'true' : 'false', text: 'Live token', onclick: function () { state.tab = 'live'; render(); } });
     var methodology = el('button', { class: 'button', type: 'button', text: 'Methodology', onclick: openMethodology });
     return el('div', { class: 'controls' },
       el('div', { class: 'field' }, el('label', { for: 'q', text: 'Search' }), search),
       el('div', { class: 'field' }, el('label', { for: 'category', text: 'Category' }), select),
+      el('div', { class: 'field toggle-field' },
+        el('label', { class: 'toggle', for: 'only-high-confidence' }, highConfidence, el('span', { text: 'Only high confidence' }))
+      ),
       el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Token status' }), el('div', { class: 'tabs' }, pre, live)),
       methodology,
       el('span', { class: 'count', text: state.tab === 'pre-token' ? rows().length + ' rows shown' : DATA.live.length + ' live-token protocols' })
@@ -341,7 +512,17 @@
 
   function sortHeader(key, label) {
     return el('th', { scope: 'col' },
-      el('button', { type: 'button', onclick: function () { if (state.sort === key) state.dir = -state.dir; else { state.sort = key; state.dir = -1; } render(); } },
+      el('button', {
+        type: 'button',
+        'aria-label': 'Sort by ' + label + (state.sort === key ? (state.dir < 0 ? ', currently descending' : ', currently ascending') : ''),
+        onclick: function () {
+          if (state.sort === key) state.dir = -state.dir;
+          else { state.sort = key; state.dir = key === 'name' ? 1 : -1; }
+          state.focusedSlug = null;
+          writePreferences();
+          render();
+        }
+      },
         label,
         state.sort === key ? el('span', { 'aria-hidden': 'true', text: state.dir < 0 ? ' v' : ' ^' }) : null
       )
@@ -356,13 +537,91 @@
     return el('td', { class: 'compare-cell' }, box);
   }
 
+  function visibleRowSlugs() {
+    var tbody = app.querySelector('[data-board-table] tbody');
+    if (!tbody) return [];
+    return Array.prototype.slice.call(tbody.querySelectorAll('tr[data-slug]')).map(function (row) {
+      return row.getAttribute('data-slug');
+    });
+  }
+
+  function focusSelectedRow() {
+    if (!state.restoreFocus || !state.focusedSlug) return;
+    var row = app.querySelector('tr[data-slug="' + selectorValue(state.focusedSlug) + '"]');
+    if (row) row.focus();
+    state.restoreFocus = false;
+  }
+
+  function moveRowSelection(offset) {
+    var slugs = visibleRowSlugs();
+    if (!slugs.length) return;
+    var current = slugs.indexOf(state.focusedSlug);
+    var next = current < 0
+      ? (offset > 0 ? 0 : slugs.length - 1)
+      : Math.min(slugs.length - 1, Math.max(0, current + offset));
+    state.focusedSlug = slugs[next];
+    state.restoreFocus = true;
+    render();
+  }
+
+  function jumpRowSelection(target) {
+    var slugs = visibleRowSlugs();
+    if (!slugs.length) return;
+    state.focusedSlug = target === 'first' ? slugs[0] : slugs[slugs.length - 1];
+    state.restoreFocus = true;
+    render();
+  }
+
+  function isInteractiveTarget(target) {
+    return Boolean(target && target.closest && target.closest(
+      'input, textarea, select, button, a[href], [contenteditable="true"], [contenteditable=""]'
+    ));
+  }
+
+  function handleBoardKeyboard(event) {
+    if (dialog.open || methodology.open || isInteractiveTarget(event.target)) return;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      moveRowSelection(1);
+    } else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+      event.preventDefault();
+      moveRowSelection(-1);
+    } else if ((event.ctrlKey || event.metaKey) && event.key === 'Home') {
+      event.preventDefault();
+      jumpRowSelection('first');
+    } else if ((event.ctrlKey || event.metaKey) && event.key === 'End') {
+      event.preventDefault();
+      jumpRowSelection('last');
+    }
+  }
+
+  function selectionLabel(slugs) {
+    if (!state.focusedSlug) return null;
+    var row = DATA.rows.filter(function (candidate) { return candidate.slug === state.focusedSlug; })[0];
+    if (!row) return null;
+    var position = slugs.indexOf(state.focusedSlug) + 1;
+    return row.name + ' selected, ' + position + ' of ' + slugs.length + ', ' + confidenceTierLabel(row) + '.';
+  }
+
+  function announceBoardStatus() {
+    var count = state.tab === 'pre-token' ? rows().length : DATA.live.length;
+    var text = state.tab === 'pre-token'
+      ? count + ' pre-token rows shown.'
+      : count + ' live-token protocols shown.';
+    if (state.tab === 'pre-token') {
+      var message = selectionLabel(visibleRowSlugs());
+      if (message) text += ' ' + message;
+    }
+    liveStatus.textContent = text;
+  }
+
   function boardTable() {
     var list = sortedRows(rows());
     if (list.length === 0) {
       return el('div', { class: 'panel' }, el('div', { class: 'empty' },
         el('h2', { text: 'No protocol matches that filter' }),
         el('p', { text: 'Clear the search or pick another category to see the board again.' }),
-        el('button', { class: 'button primary', type: 'button', text: 'Clear filters', onclick: function () { state.q = ''; state.category = 'all'; writeHash(); render(); } })
+        el('button', { class: 'button primary', type: 'button', text: 'Clear filters', onclick: function () { state.q = ''; state.category = 'all'; state.onlyHighConfidence = false; state.focusedSlug = null; writePreferences(); writeHash(); render(); } })
       ));
     }
     var max = list[0].implied_value_usd || 1;
@@ -371,9 +630,13 @@
       var growth = r.change_7d === null ? 'n/a' : fmtPct(r.change_7d);
       var growthClass = r.change_7d === null ? '' : r.change_7d >= 0 ? 'pos' : 'neg';
       var tr = el('tr', {
-        'data-selected': state.selected === r.slug ? 'true' : 'false',
-        tabindex: '0',
-        onclick: function () { openDetail(r.slug); },
+        'data-slug': r.slug,
+        'data-selected': state.focusedSlug === r.slug ? 'true' : 'false',
+        tabindex: state.focusedSlug === r.slug ? '0' : '-1',
+        onclick: function () {
+          state.focusedSlug = r.slug;
+          openDetail(r.slug);
+        },
         onkeydown: function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(r.slug); } }
       },
         el('td', { class: 'num', text: String(r.rank) }),
@@ -385,6 +648,8 @@
         el('td', { class: 'num money', text: fmtUsd(r.tvl_usd) }),
         el('td', { class: 'num ' + growthClass, text: growth }),
         el('td', { class: 'num', text: fmtAge(r.age_days) }),
+        el('td', { class: 'num', text: formatRatio(r) }),
+        el('td', { class: 'num' }, confidenceBadge(r)),
         el('td', null, el('div', { class: 'implied' },
           el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round((r.implied_value_usd / max) * 100)) + '%' })),
           el('span', { class: 'num money', text: fmtUsd(r.implied_value_usd) }),
@@ -395,17 +660,31 @@
       );
       tbody.appendChild(tr);
     });
-    return el('div', { class: 'panel' },
+    return el('div', { class: 'panel', 'data-board-table': 'true' },
       el('div', { class: 'table-wrap' },
         el('table', null,
-          el('caption', { class: 'sub', text: 'Pre-token protocols, strongest implied value first. Select a row for its model and farm plan.' }),
+          el('caption', { class: 'sub', text: 'Pre-token protocols. Use the up or down arrow keys to select a row and Enter to open its model and farm plan.' }),
           el('thead', null, el('tr', null,
-            sortHeader('implied', 'Rank'),
+            el('th', { scope: 'col', 'aria-sort': state.sort === 'implied' ? (state.dir < 0 ? 'descending' : 'ascending') : 'none' },
+              el('button', {
+                type: 'button',
+                'aria-label': 'Sort by rank' + (state.sort === 'implied' ? (state.dir < 0 ? ', currently descending' : ', currently ascending') : ''),
+                onclick: function () {
+                  if (state.sort === 'implied') state.dir = -state.dir;
+                  else { state.sort = 'implied'; state.dir = -1; }
+                  state.focusedSlug = null;
+                  writePreferences();
+                  render();
+                }
+              }, 'Rank', state.sort === 'implied' ? el('span', { 'aria-hidden': 'true', text: state.dir < 0 ? ' v' : ' ^' }) : null)
+            ),
             sortHeader('name', 'Protocol'),
             el('th', { scope: 'col', text: 'Compare' }),
             sortHeader('tvl', 'TVL'),
             sortHeader('growth', '7d'),
             sortHeader('age', 'Age'),
+            sortHeader('ratio', 'Value/TVL ratio'),
+            sortHeader('confidence', 'Confidence'),
             el('th', { scope: 'col', text: 'Thesis' }),
             sortHeader('implied', 'Implied value'),
             el('th', { scope: 'col', text: 'Token' })
@@ -505,6 +784,7 @@
   }
 
   var dialog = el('dialog', { class: 'detail', id: 'detail', 'aria-labelledby': 'detail-title' });
+  var liveStatus = el('p', { class: 'sr-only', id: 'board-status', role: 'status', 'aria-live': 'polite' });
   dialog.addEventListener('close', function () { state.selected = null; writeHash(); });
 
   function openDetail(slug) {
@@ -528,10 +808,12 @@
         el('div', null, el('span', { text: 'TVL' }), el('b', { class: 'num', text: fmtUsd(row.tvl_usd) })),
         el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: fmtPct(row.change_7d) })),
         el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
+        el('div', null, el('span', { text: 'Value/TVL ratio' }), el('b', { class: 'num', text: formatRatio(row) })),
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
         el('div', null, el('span', { text: 'Maturity multiplier' }), el('b', { class: 'num', text: String(row.maturity_multiplier) })),
         el('div', null, el('span', { text: 'Sector multiplier' }), el('b', { class: 'num', text: String(row.category_multiplier || 1) })),
-        el('div', null, el('span', { text: 'Implied value (band)' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) + '  (' + fmtUsd(row.band_low_usd) + ' – ' + fmtUsd(row.band_high_usd) + ')' }), confidenceDot(row))
+        el('div', null, el('span', { text: 'Implied value (band)' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) + '  (' + fmtUsd(row.band_low_usd) + ' – ' + fmtUsd(row.band_high_usd) + ')' }), confidenceDot(row)),
+        el('div', null, el('span', { text: 'Confidence tier' }), el('b', { class: 'num', text: confidenceOf(row) + '/100 ' + confidenceTierLabel(row) }))
       ),
       el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(impliedOf(row, DATA.model)) + (impliedOf(row, DATA.model) === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
     ));
@@ -568,23 +850,27 @@
     var shell = el('div', { class: 'shell' });
     shell.appendChild(header());
     shell.appendChild(lede());
+    if (state.tab === 'pre-token') shell.appendChild(watchlistHealth());
     shell.appendChild(controls());
     if (state.tab === 'pre-token') shell.appendChild(comparisonPanel());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
     if (state.tab === 'pre-token') shell.appendChild(modelPanel());
     app.appendChild(shell);
     app.setAttribute('aria-busy', 'false');
+    focusSelectedRow();
     if (!dialog.isConnected) app.appendChild(dialog);
     if (!methodology.isConnected) app.appendChild(methodology);
     if (state.selected) openDetail(state.selected);
   }
 
   readHash();
+  readPreferences();
   render();
   window.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') {
       if (dialog.open) dialog.close();
       if (methodology.open) methodology.close();
     }
+    handleBoardKeyboard(e);
   });
 })();
