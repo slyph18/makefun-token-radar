@@ -732,6 +732,18 @@
       el('p', { class: 'sub', text: 'The result is a point estimate, not a price. It ships with a low and high band so the same inputs never imply false precision.' })
     ));
     method.appendChild(el('section', { class: 'detail-section' },
+      el('h3', { text: 'Comps fit & out-of-sample validation' }),
+      el('p', { text: 'The value model is not hand-set: it is fitted on the ' + (DATA.comps ? DATA.comps.comp_count : 128) + ' protocols in the same snapshot that already have a token (market cap known). We regress log10 market cap on log10 TVL with per-category and per-age residual effects, shrunk toward zero so sparse categories stay honest. Every launched protocol is then held out once (leave-one-out) and re-predicted by the model fitted without it.' }),
+      DATA.comps ? el('div', { class: 'equation' },
+        el('div', null, el('span', { text: 'Comps used' }), el('b', { class: 'num', text: String(DATA.comps.comp_count) })),
+        el('div', null, el('span', { text: 'TVL slope (elasticity)' }), el('b', { class: 'num', text: DATA.comps.tvl_slope.toFixed(3) })),
+        el('div', null, el('span', { text: 'Intercept log10' }), el('b', { class: 'num', text: DATA.comps.intercept_log10.toFixed(3) })),
+        el('div', null, el('span', { text: 'LOO median absolute error' }), el('b', { class: 'num', text: DATA.comps.median_absolute_error_pct.toFixed(1) + '%' })),
+        el('div', null, el('span', { text: 'LOO median calibration (predicted/actual)' }), el('b', { class: 'num', text: DATA.comps.calibration_ratio.toFixed(2) + 'x' }))
+      ) : null,
+      el('p', { class: 'sub', text: 'A calibration near 1.0x means the model neither systematically over- nor under-prices protocols it has never seen; the pre-token board inherits exactly this fitted relationship.' })
+    ));
+    method.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Worked example: rank 1' }),
       el('p', { class: 'sub', text: row.name + ' — the same row the board lists first.' }),
       el('div', { class: 'equation' },

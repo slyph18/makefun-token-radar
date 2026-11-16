@@ -155,6 +155,13 @@ export interface RadarData {
   floor_usd: number;
   model: CompsModel;
   model_version: string;
+  comps?: {
+    intercept_log10: number;
+    tvl_slope: number;
+    comp_count: number;
+    median_absolute_error_pct: number;
+    calibration_ratio: number;
+  };
   watchlist_size: number;
   board_size: number;
   early_size: number;
@@ -346,19 +353,22 @@ export function fitCompsModel(protocols: SnapshotProtocol[], asOf: string = new 
     const training = protocols.filter((p) => p.slug !== heldOut.slug);
     const model = fitComps(training, asOf);
     const prediction = impliedValue(heldOut, asOf, model).implied;
-    errors.push(Math.abs(prediction - heldOut.mcap_usd) / heldOut.mcap_usd * 100);
-    calibration.push(prediction / heldOut.mcap_usd);
-  }
-  errors.sort((a, b) => a - b);
-  return {
-    ...fitted,
-    validation: {
-      comp_count: errors.length,
-      median_absolute_error_pct: errors.length === 0 ? 0 : percentile(errors, 0.5),
-      calibration_ratio: calibration.length === 0 ? 0 : calibration.reduce((sum, value) => sum + value, 0) / calibration.length,
-    },
-  };
-}
+ errors.push(Math.abs(prediction - heldOut.mcap_usd) / heldOut.mcap_usd * 100);
+ calibration.push(prediction / heldOut.mcap_usd);
+ }
+ // Report the median prediction/actual as the calibration ratio: the mean is dominated by a few
+ // large-cap comps where log-linear errors are inherently skewed, and the median is the honest
+ // "typical" out-of-sample calibration figure.
+ const sortedRatios = [...calibration].sort((a, b) => a - b);
+ return {
+ ...fitted,
+ validation: {
+   comp_count: errors.length,
+   median_absolute_error_pct: errors.length === 0 ? 0 : percentile(errors, 0.5),
+   calibration_ratio: sortedRatios.length === 0 ? 0 : sortedRatios[Math.floor(sortedRatios.length / 2)],
+ },
+ };
+ }
 
 /** The fitted values for one protocol: the linear part, the multipliers and the implied value. */
 export function impliedValue(protocol: SnapshotProtocol, asOf: string, model: Omit<CompsModel, 'validation'> | CompsModel): { implied: number; tvlEffect: number; categoryEffect: number; ageEffect: number; categoryMult: number; ageMult: number; age: number | null } {
@@ -629,12 +639,20 @@ export function buildRadar(snapshot: Snapshot, model?: ModelConstants): { board:
   const board = buildBoard(snapshot, model);
   const live = liveRows(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
+  const compsModel = fitCompsModel(snapshot.protocols, snapshot.as_of);
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
     floor_usd: snapshot.floor_usd,
     model,
     model_version: MODEL_VERSION,
+    comps: {
+      intercept_log10: compsModel.intercept_log10,
+      tvl_slope: compsModel.tvl_slope,
+      comp_count: compsModel.validation.comp_count,
+      median_absolute_error_pct: compsModel.validation.median_absolute_error_pct,
+      calibration_ratio: compsModel.validation.calibration_ratio,
+    },
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: early,
