@@ -6,16 +6,12 @@
 // snapshot's live-token protocols are kept apart and shown as the market's own values, never mixed into
 // the ranked board.
 //
-// Implied value follows only from the snapshot's own figures:
+// Implied value follows a comps-fitted, log-linear model:
 //
-//   base       = tvl_usd x BASE_MULTIPLE
-//   growth     = clamp(change_7d, -60, 120) per cent
-//   growthMult = 1 + (growth / 100) x GROWTH_WEIGHT
-//   maturity   = 0.6 + min(age_days, 1095) / 1095 x 0.4   (age_days unknown: 365)
-//   implied    = max(1, round(base x growthMult x maturity))
+//   log10(mcap) = intercept + slope x log10(TVL) + category effect + age effect
 //
-// The constants are the house model's, stated in the dashboard and changeable in the model sandbox. No
-// protocol name is ever special-cased: the same function scores every row.
+// The launched protocols in the snapshot fit the line and the effects. No protocol name is ever
+// special-cased: the same function scores every pre-token row.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -38,46 +34,42 @@ export interface Snapshot {
   floor_usd: number;
   protocols: SnapshotProtocol[];
   watchlist: string[];
+  gas_context: GasContext | null;
 }
 
-/** The model's constants, as the dashboard states them and the sandbox may change them. */
-export interface ModelConstants {
-  base_multiple: number;
-  growth_weight: number;
-  growth_floor: number;
-  growth_cap: number;
-  maturity_floor: number;
-  maturity_range: number;
-  maturity_days: number;
-  unknown_age_days: number;
-}
-
-export const MODEL: ModelConstants = {
-  base_multiple: 0.25,
-  growth_weight: 0.5,
-  growth_floor: -60,
-  growth_cap: 120,
-  maturity_floor: 0.6,
-  maturity_range: 0.4,
-  maturity_days: 1095,
-  unknown_age_days: 365,
-};
-
-/** Sector weight: how strongly a category's TVL predicts future token value (stated in the dashboard). */
-export const CATEGORY_MULT: Record<string, number> = {
-  'Dexs': 1.25, 'Lending': 1.2, 'Liquid Restaking': 1.15, 'Restaking': 1.15,
-  'Perps': 1.2, 'Derivatives': 1.15, 'RWA': 1.2, 'Bridge': 0.9,
-  'Liquid Staking': 0.95, 'CDP': 1.1, 'Yield': 1.05, 'Uncollateralized Lending': 1.1,
-  'Onchain Capital Allocator': 1.1, 'Risk Curators': 1.05, 'Launchpad': 1.1,
-  'Institutional Vault': 1.05, 'Pension Vault': 1.05, 'Index': 1.0,
-};
-export const DEFAULT_CATEGORY_MULT = 1.0;
-/** Sensitivity band: the implied value is a range, not a point. */
-export const BAND_LOW = 0.72;
-export const BAND_HIGH = 1.38;
+/** How much an effect is pulled toward zero, as `count / (count + SHRINKAGE)`. */
+export const EFFECT_SHRINKAGE = 5;
+/** Slope bounds that keep the model a TVL comps model rather than an uncontrolled regression. */
+export const TVL_SLOPE_MIN = 0.3;
+export const TVL_SLOPE_MAX = 1.2;
 
 /** The model's version label: the dashboard names it and the rules quote it. */
 export const MODEL_VERSION = 'radar-1';
+
+/** Optional snapshot context for farm-plan transaction costs. */
+export interface GasContext {
+  per_interaction_usd: number;
+}
+
+/** The comps-fitted, log-linear model. Effects are in log10 dollars. */
+export interface CompsModel {
+  version: 'comps-log10-ols-1';
+  intercept_log10: number;
+  tvl_slope: number;
+  tvl_slope_clamped: boolean;
+  category_effects: Record<string, number>;
+  age_effects: Record<string, number>;
+  shrinkage_counts: { category: Record<string, number>; age: Record<string, number> };
+  band: { low_multiplier: number; mid_multiplier: number; high_multiplier: number };
+  validation: ModelValidation;
+}
+
+/** Leave-one-out validation on the launched comps themselves. */
+export interface ModelValidation {
+  comp_count: number;
+  median_absolute_error_pct: number;
+  calibration_ratio: number;
+}
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
 export const EARLY_ROWS = 160;
@@ -113,14 +105,16 @@ export interface BoardRow {
   band_high_usd: number;
   category_multiplier: number;
   model: {
-    base_multiple: number;
-    growth_pct: number;
-    growth_multiplier: number;
-    maturity_multiplier: number;
+    intercept_log10: number;
+    tvl_slope: number;
+    tvl_effect_log10: number;
+    category_effect_log10: number;
+    age_effect_log10: number;
     category_multiplier: number;
-    age_days: number | null;
+    age_multiplier: number;
   };
   farm_steps: string[];
+  farm_plan: FarmPlan | null;
 }
 
 /** A compact view of one row, with the sensitivity band the dashboard shows. */
@@ -140,8 +134,7 @@ export interface RadarRow {
   band_low_usd: number;
   band_high_usd: number;
   category_multiplier: number;
-  growth_multiplier: number;
-  maturity_multiplier: number;
+  farm_plan_line: string | null;
 }
 
 /** A live-token protocol: it already trades, so the board shows the market's own value, not a model's. */
@@ -160,7 +153,7 @@ export interface RadarData {
   as_of: string;
   source: string;
   floor_usd: number;
-  model: ModelConstants;
+  model: CompsModel;
   model_version: string;
   watchlist_size: number;
   board_size: number;
@@ -168,6 +161,17 @@ export interface RadarData {
   live_size: number;
   rows: RadarRow[];
   live: LiveRow[];
+}
+
+/** The netted farm plan shown beside the thesis for the highest-ranked rows. */
+export interface FarmPlan {
+  gas_context: 'snapshot' | 'fallback';
+  cost_per_interaction_usd: number;
+  expected_interactions: number;
+  expected_tx_cost_usd: number;
+  expected_value_share_usd: number;
+  net_usd: number;
+  line: string;
 }
 
 /** Why the snapshot is not one this model can score. */
@@ -232,18 +236,144 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
   return Math.max(0, Math.floor((a - b) / DAY_MS));
 }
 
-/** The three multipliers and the implied value one protocol gets under `model`. */
-export function impliedValue(protocol: SnapshotProtocol, asOf: string, model: ModelConstants): { implied: number; growthPct: number; growthMult: number; maturityMult: number; categoryMult: number; age: number | null } {
+const AGE_BUCKETS = ['<90d', '90-365d', '1-2y', '>2y', 'unknown'] as const;
+type AgeBucket = (typeof AGE_BUCKETS)[number];
+
+/** The listing-age bucket the comps model uses; a bad or absent date is its own bucket. */
+function ageBucketFor(protocol: SnapshotProtocol, asOf: string): AgeBucket {
   const age = ageDays(asOf, protocol.listed_at);
-  const rawGrowth = finite(protocol.change_7d, 0);
-  const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
-  const growthMult = 1 + (growthPct / 100) * model.growth_weight;
-  const ageForModel = age ?? model.unknown_age_days;
-  const maturityMult = model.maturity_floor + (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-  const base = protocol.tvl_usd * model.base_multiple;
-  const categoryMult = protocol.category === null ? DEFAULT_CATEGORY_MULT : (CATEGORY_MULT[protocol.category] ?? DEFAULT_CATEGORY_MULT);
-  const implied = Math.max(1, Math.round(base * growthMult * maturityMult * categoryMult));
-  return { implied, growthPct, growthMult, maturityMult, categoryMult, age };
+  if (age === null) return 'unknown';
+  if (age < 90) return '<90d';
+  if (age <= 365) return '90-365d';
+  if (age <= 730) return '1-2y';
+  return '>2y';
+}
+
+/** An inclusive percentile from an already ascending list, using linear interpolation. */
+function percentile(sorted: number[], percentile: number): number {
+  if (sorted.length === 0) return 0;
+  const position = (sorted.length - 1) * percentile;
+  const low = Math.floor(position);
+  const high = Math.ceil(position);
+  if (low === high) return sorted[low]!;
+  return sorted[low]! + (sorted[high]! - sorted[low]!) * (position - low);
+}
+
+/** A shrunk mean of residuals for one categorical effect. */
+function shrunkEffect(count: number, sum: number): number {
+  return (sum / count) * (count / (count + EFFECT_SHRINKAGE));
+}
+
+type FittedCompsModel = Omit<CompsModel, 'validation'> & { residuals: number[] };
+
+/** Fit the line and the two shrunk residual effects; validation is attached only at the public boundary. */
+function fitComps(protocols: SnapshotProtocol[], asOf: string): FittedCompsModel {
+  const comps = protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
+  if (comps.length < 2) throw new SnapshotError('the snapshot needs at least two launched protocols with positive TVL and market cap');
+
+  const xs = comps.map((p) => Math.log10(p.tvl_usd));
+  const ys = comps.map((p) => Math.log10(p.mcap_usd));
+  const xMean = xs.reduce((sum, value) => sum + value, 0) / comps.length;
+  const yMean = ys.reduce((sum, value) => sum + value, 0) / comps.length;
+  const cross = xs.reduce((sum, x, i) => sum + (x - xMean) * (ys[i]! - yMean), 0);
+  const spread = xs.reduce((sum, x) => sum + (x - xMean) ** 2, 0);
+  const rawSlope = spread === 0 ? 0 : cross / spread;
+  const tvlSlope = Math.min(TVL_SLOPE_MAX, Math.max(TVL_SLOPE_MIN, rawSlope));
+  const intercept = yMean - tvlSlope * xMean;
+
+  const categoryCounts = new Map<string, number>();
+  const categorySums = new Map<string, number>();
+  comps.forEach((p, i) => {
+    const key = p.category ?? 'unknown';
+    const residual = ys[i]! - (intercept + tvlSlope * xs[i]!);
+    categoryCounts.set(key, (categoryCounts.get(key) ?? 0) + 1);
+    categorySums.set(key, (categorySums.get(key) ?? 0) + residual);
+  });
+  const categoryEffects: Record<string, number> = {};
+  const categoryShrinkage: Record<string, number> = {};
+  for (const [key, count] of categoryCounts) {
+    categoryEffects[key] = shrunkEffect(count, categorySums.get(key)!);
+    categoryShrinkage[key] = count;
+  }
+
+  const ageCounts = new Map<string, number>();
+  const ageSums = new Map<string, number>();
+  comps.forEach((p, i) => {
+    const key = ageBucketFor(p, asOf);
+    const prediction = intercept + tvlSlope * xs[i]! + (categoryEffects[p.category ?? 'unknown'] ?? 0);
+    const residual = ys[i]! - prediction;
+    ageCounts.set(key, (ageCounts.get(key) ?? 0) + 1);
+    ageSums.set(key, (ageSums.get(key) ?? 0) + residual);
+  });
+  const ageEffects: Record<string, number> = {};
+  const ageShrinkage: Record<string, number> = {};
+  for (const [key, count] of ageCounts) {
+    ageEffects[key] = shrunkEffect(count, ageSums.get(key)!);
+    ageShrinkage[key] = count;
+  }
+
+  const residuals = comps.map((p, i) => {
+    const prediction = intercept + tvlSlope * xs[i]! +
+      (categoryEffects[p.category ?? 'unknown'] ?? 0) +
+      (ageEffects[ageBucketFor(p, asOf)] ?? 0);
+    return ys[i]! - prediction;
+  }).sort((a, b) => a - b);
+
+  return {
+    version: 'comps-log10-ols-1',
+    intercept_log10: intercept,
+    tvl_slope: tvlSlope,
+    tvl_slope_clamped: tvlSlope !== rawSlope,
+    category_effects: categoryEffects,
+    age_effects: ageEffects,
+    shrinkage_counts: { category: categoryShrinkage, age: ageShrinkage },
+    band: {
+      low_multiplier: Math.max(0, 10 ** percentile(residuals, 0.25)),
+      mid_multiplier: Math.max(0, 10 ** percentile(residuals, 0.5)),
+      high_multiplier: Math.max(0, 10 ** percentile(residuals, 0.75)),
+    },
+    residuals,
+  };
+}
+
+/** Fit a comps model from the launched protocols in one snapshot. */
+export function fitCompsModel(protocols: SnapshotProtocol[], asOf: string = new Date().toISOString().slice(0, 10)): CompsModel {
+  const fitted = fitComps(protocols, asOf);
+  const errors: number[] = [];
+  const calibration: number[] = [];
+  for (const heldOut of protocols) {
+    if (heldOut.mcap_usd === null || heldOut.mcap_usd <= 0 || heldOut.tvl_usd <= 0) continue;
+    const training = protocols.filter((p) => p.slug !== heldOut.slug);
+    const model = fitComps(training, asOf);
+    const prediction = impliedValue(heldOut, asOf, model).implied;
+    errors.push(Math.abs(prediction - heldOut.mcap_usd) / heldOut.mcap_usd * 100);
+    calibration.push(prediction / heldOut.mcap_usd);
+  }
+  errors.sort((a, b) => a - b);
+  return {
+    ...fitted,
+    validation: {
+      comp_count: errors.length,
+      median_absolute_error_pct: errors.length === 0 ? 0 : percentile(errors, 0.5),
+      calibration_ratio: calibration.length === 0 ? 0 : calibration.reduce((sum, value) => sum + value, 0) / calibration.length,
+    },
+  };
+}
+
+/** The fitted values for one protocol: the linear part, the multipliers and the implied value. */
+export function impliedValue(protocol: SnapshotProtocol, asOf: string, model: Omit<CompsModel, 'validation'> | CompsModel): { implied: number; tvlEffect: number; categoryEffect: number; ageEffect: number; categoryMult: number; ageMult: number; age: number | null } {
+  const age = ageDays(asOf, protocol.listed_at);
+  const bucket = ageBucketFor(protocol, asOf);
+  const categoryEffect = protocol.category === null ? 0 : (model.category_effects[protocol.category] ?? 0);
+  const ageEffect = model.age_effects[bucket] ?? 0;
+  const tvlEffect = protocol.tvl_usd > 0 ? model.tvl_slope * Math.log10(protocol.tvl_usd) : 0;
+  const linear = model.intercept_log10 + tvlEffect + categoryEffect + ageEffect;
+  const categoryMult = 10 ** categoryEffect;
+  const ageMult = 10 ** ageEffect;
+  const implied = protocol.tvl_usd > 0 && Number.isFinite(linear)
+    ? Math.max(1, Math.round(10 ** linear))
+    : 1;
+  return { implied, tvlEffect, categoryEffect, ageEffect, categoryMult, ageMult, age };
 }
 
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
@@ -273,7 +403,7 @@ export interface BoardSummary {
 }
 
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
-export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
+export function buildBoard(snapshot: Snapshot, model?: ModelConstants): BoardRow[] {
   const index = bySlug(snapshot.protocols);
   const chosen = new Map<string, SnapshotProtocol>();
   // The watchlist is the floor: every slug, even one the snapshot no longer carries (it cannot, but the
@@ -291,9 +421,10 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   for (const p of early) chosen.set(p.slug, p);
 
   const variance = growthVariance(snapshot.protocols);
+  const compsModel = fitCompsModel(snapshot.protocols, snapshot.as_of);
   const scored = [...chosen.values()].map((p) => {
-    const { implied, growthPct, growthMult, maturityMult, categoryMult, age } = impliedValue(p, snapshot.as_of, model);
-    return { p, implied, growthPct, growthMult, maturityMult, categoryMult, age, confidence: confidenceScore(p, snapshot.as_of, variance) };
+    const { implied, tvlEffect, categoryEffect, ageEffect, categoryMult, ageMult, age } = impliedValue(p, snapshot.as_of, compsModel);
+    return { p, implied, tvlEffect, categoryEffect, ageEffect, categoryMult, ageMult, age, confidence: confidenceScore(p, snapshot.as_of, variance) };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
@@ -312,19 +443,54 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     age_days: s.age,
     confidence: s.confidence,
     implied_value_usd: s.implied,
-    band_low_usd: Math.max(1, Math.round(s.implied * BAND_LOW)),
-    band_high_usd: Math.round(s.implied * BAND_HIGH),
+    band_low_usd: Math.max(1, Math.round(s.implied * compsModel.band.low_multiplier)),
+    band_high_usd: Math.max(s.implied, Math.round(s.implied * compsModel.band.high_multiplier)),
     category_multiplier: s.categoryMult,
     model: {
-      base_multiple: model.base_multiple,
-      growth_pct: s.growthPct,
-      growth_multiplier: round4(s.growthMult),
-      maturity_multiplier: round4(s.maturityMult),
-      category_multiplier: s.categoryMult,
-      age_days: s.age,
+      intercept_log10: round4(compsModel.intercept_log10),
+      tvl_slope: compsModel.tvl_slope,
+      tvl_effect_log10: round4(s.tvlEffect),
+      category_effect_log10: round4(s.categoryEffect),
+      age_effect_log10: round4(s.ageEffect),
+      category_multiplier: round4(s.categoryMult),
+      age_multiplier: round4(s.ageMult),
     },
     farm_steps: farmSteps(s.p, s.age).map(stepText),
+    farm_plan: i < FARM_PLAN_ROWS ? farmPlan(s.implied, s.p, (snapshot as any).gas_context ?? null) : null,
   }));
+}
+
+/** How many top-ranked rows carry the netted transaction-cost thesis. */
+export const FARM_PLAN_ROWS = 20;
+
+/** The netted farm thesis for one top-ranked row. */
+function farmPlan(implied: number, protocol: SnapshotProtocol, gasContext: GasContext | null): FarmPlan {
+  const source = gasContext !== null && Number.isFinite(gasContext.per_interaction_usd) && gasContext.per_interaction_usd >= 0
+    ? 'snapshot'
+    : 'fallback';
+  const costPerInteraction = source === 'snapshot'
+    ? gasContext!.per_interaction_usd
+    : 1.5;
+  const interactions = Math.max(1, protocol.chains.length);
+  const cost = costPerInteraction * interactions;
+  const net = implied - cost;
+  const line = `${interactions} estimated interaction${interactions === 1 ? '' : 's'} on ${protocol.chains.length || 1} chain${protocol.chains.length === 1 ? '' : 's'}: ` +
+    `about $${cost.toFixed(2)} total gas, $${fmtNet(net)} net implied value`;
+  return {
+    gas_context: source,
+    cost_per_interaction_usd: costPerInteraction,
+    expected_interactions: interactions,
+    expected_tx_cost_usd: cost,
+    expected_value_share_usd: implied,
+    net_usd: net,
+    line,
+  };
+}
+
+/** Farm-plan net, rounded to cents and signed only when negative. */
+function fmtNet(value: number): string {
+  const rounded = Math.round(value * 100) / 100;
+  return rounded < 0 ? `-${Math.abs(rounded).toFixed(2)}` : rounded.toFixed(2);
 }
 
 const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
@@ -459,7 +625,7 @@ export function radarRow(row: BoardRow): RadarRow {
 }
 
 /** Everything the dashboard renders, from the snapshot. */
-export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
+export function buildRadar(snapshot: Snapshot, model?: ModelConstants): { board: BoardRow[]; radar: RadarData } {
   const board = buildBoard(snapshot, model);
   const live = liveRows(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
